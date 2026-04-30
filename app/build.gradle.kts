@@ -15,6 +15,9 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // ← AGREGAR ESTO: lee la key de local.properties
+        buildConfigField("String", "GEMINI_API_KEY", "\"${project.findProperty("GEMINI_API_KEY") ?: ""}\"")
     }
 
     buildTypes {
@@ -32,6 +35,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true  // ← AGREGAR ESTO: activa la generación de BuildConfig
     }
 }
 
@@ -54,6 +58,9 @@ dependencies {
 
     // ML Kit
     implementation(libs.mlkit.barcode.scanning)
+
+    // OkHttp
+    implementation(libs.okhttp)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
