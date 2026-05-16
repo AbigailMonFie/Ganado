@@ -66,10 +66,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 // ─── API Key ───────────────────────────────────────────────────────────────────
-// En local.properties agrega:   GEMINI_API_KEY=AIzaSy...
-// En build.gradle (app) dentro de defaultConfig agrega:
-//   buildConfigField "String", "GEMINI_API_KEY", "\"${project.findProperty('GEMINI_API_KEY') ?: ''}\""
-private const val API_KEY: String = "AIzaSyBXche-jwFo4K--ZAoHI8E1QeNMMkSXVZU"
+// Obtener la API Key desde BuildConfig (configurada en build.gradle y local.properties)
+private val API_KEY: String = BuildConfig.GEMINI_API_KEY
 private const val GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key="
 
 // ─── Cliente HTTP singleton ────────────────────────────────────────────────────
@@ -251,7 +249,7 @@ fun OnboardingTutorial(onDismiss: () -> Unit) {
     var currentStep by remember { mutableStateOf(0) }
     val steps = listOf(
         TutorialStep(
-            "¡Bienvenido a GanadoApp!",
+            "¡Bienvenido a Hato!",
             "Esta herramienta utiliza IA para ayudarte a identificar y evaluar tu ganado rápidamente.",
             Icons.Default.Info
         ),
@@ -625,7 +623,7 @@ fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
 
 private fun takePhoto(context: Context, imageCapture: ImageCapture, executor: ExecutorService) {
     val name = "IMG_${System.currentTimeMillis()}.jpg"
-    val folderName = "GanadoApp" // Nombre de tu carpeta personalizada
+    val folderName = "Hato" // Nombre de tu carpeta personalizada
 
     val contentValues = ContentValues().apply {
         put(MediaStore.MediaColumns.DISPLAY_NAME, name)
