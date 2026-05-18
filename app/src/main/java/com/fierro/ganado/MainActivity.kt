@@ -9,6 +9,8 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
@@ -35,8 +37,11 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.foundation.Image
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -428,8 +433,12 @@ fun CameraPreview(cameraExecutor: ExecutorService, onResultAdded: (HistoryItem) 
     var showSheet by remember { mutableStateOf(false) }
     
     var detecciones by remember { mutableStateOf<List<Deteccion>>(emptyList()) }
+    var analysisSize by remember { mutableStateOf(Size.Zero) }
     var previewSize by remember { mutableStateOf(Size.Zero) }
     val textMeasurer = rememberTextMeasurer()
+
+    var selectedImageUri by remember { mutableStateOf<android.net.Uri?>(null) }
+    var isProcessingGallery by remember { mutableStateOf(false) }
 
     val sheetState = rememberModalBottomSheetState()
 
@@ -451,116 +460,154 @@ fun CameraPreview(cameraExecutor: ExecutorService, onResultAdded: (HistoryItem) 
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
         uri?.let {
-            if (isAnalyzing) return@let
-            isAnalyzing = true
-            showSheet = true
-            aiResponse = "Analizando imagen de galería..."
+            selectedImageUri = it
+            isProcessingGallery = true
             scope.launch {
                 try {
+                    // Simular retraso para la animación de identificación
+                    kotlinx.coroutines.delay(1500)
+                    
                     val inputStream = context.contentResolver.openInputStream(it)
                     val bitmap = BitmapFactory.decodeStream(inputStream)
                     if (bitmap != null) {
-                        val response = analyzeImageWithGemini(bitmap)
-                        aiResponse = response
-                        onResultAdded(HistoryItem(result = response))
-                    } else {
-                        aiResponse = "Error: No se pudo cargar la imagen"
+                        analysisSize = Size(bitmap.width.toFloat(), bitmap.height.toFloat())
+                        val results = detector.detectar(bitmap)
+                        detecciones = results
                     }
                 } catch (e: Exception) {
-                    aiResponse = "Error: ${e.message}"
+                    Log.e("Gallery", "Error al procesar imagen", e)
                 } finally {
-                    isAnalyzing = false
+                    isProcessingGallery = false
                 }
             }
         }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-
-        // ── Vista de cámara ──
-        AndroidView(
-            factory = { ctx ->
-                val previewView = PreviewView(ctx).apply {
-                    addOnLayoutChangeListener { _, left, top, right, bottom, _, _, _, _ ->
-                        previewSize = Size((right - left).toFloat(), (bottom - top).toFloat())
-                    }
-                }
-                val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                cameraProviderFuture.addListener({
-                    val cameraProvider = cameraProviderFuture.get()
-                    val preview = Preview.Builder().build().also {
-                        it.surfaceProvider = previewView.surfaceProvider
-                    }
-                    val imageAnalysis = ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-                        .build()
-                    imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                        val rotation = imageProxy.imageInfo.rotationDegrees
-                        // 1. Detección de ganado (ONNX)
-                        val bitmap = imageProxyToBitmap(imageProxy)
-                        if (bitmap != null) {
-                            val results = detector.detectar(bitmap)
-                            previewView.post {
-                                detecciones = results
-                            }
+        if (selectedImageUri == null) {
+            // ── Vista de cámara ──
+            AndroidView(
+                factory = { ctx ->
+                    val previewView = PreviewView(ctx).apply {
+                        addOnLayoutChangeListener { _, left, top, right, bottom, _, _, _, _ ->
+                            previewSize = Size((right - left).toFloat(), (bottom - top).toFloat())
                         }
-                        
-                        // 2. Detección de código de barras
-                        val mediaImage = imageProxy.image
-                        if (mediaImage != null) {
-                            val image = InputImage.fromMediaImage(mediaImage, rotation)
-                            scanner.process(image)
-                                .addOnSuccessListener { barcodes ->
-                                    for (barcode in barcodes) {
-                                        barcode.rawValue?.let { text ->
-                                            previewView.post { scannedText = text }
+                    }
+                    val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+                    cameraProviderFuture.addListener({
+                        val cameraProvider = cameraProviderFuture.get()
+                        val preview = Preview.Builder().build().also {
+                            it.surfaceProvider = previewView.surfaceProvider
+                        }
+                        val imageAnalysis = ImageAnalysis.Builder()
+                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                            .build()
+                        imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                            // Solo procesar cámara si no hay imagen de galería seleccionada
+                            if (selectedImageUri == null) {
+                                val rotation = imageProxy.imageInfo.rotationDegrees
+                                val bitmap = imageProxyToBitmap(imageProxy)
+                                if (bitmap != null) {
+                                    analysisSize = Size(bitmap.width.toFloat(), bitmap.height.toFloat())
+                                    val results = detector.detectar(bitmap)
+                                    previewView.post { detecciones = results }
+                                }
+                            }
+                            
+                            // Detección de código de barras (opcional mantener aquí)
+                            val mediaImage = imageProxy.image
+                            if (mediaImage != null) {
+                                val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+                                scanner.process(image)
+                                    .addOnSuccessListener { barcodes ->
+                                        for (barcode in barcodes) {
+                                            barcode.rawValue?.let { text ->
+                                                previewView.post { scannedText = text }
+                                            }
                                         }
                                     }
-                                }
-                                .addOnCompleteListener {
-                                    imageProxy.close()
-                                }
-                        } else {
-                            imageProxy.close()
+                                    .addOnCompleteListener { imageProxy.close() }
+                            } else {
+                                imageProxy.close()
+                            }
+                        }
+                        try {
+                            cameraProvider.unbindAll()
+                            cameraProvider.bindToLifecycle(
+                                lifecycleOwner,
+                                CameraSelector.DEFAULT_BACK_CAMERA,
+                                preview, imageAnalysis, imageCapture
+                            )
+                        } catch (e: Exception) {
+                            Log.e("Camera", "Error al vincular ciclo de vida", e)
+                        }
+                    }, ContextCompat.getMainExecutor(ctx))
+                    previewView
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            // ── Vista de Imagen de Galería ──
+            Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+                androidx.compose.foundation.Image(
+                    painter = androidx.compose.ui.graphics.painter.BitmapPainter(
+                        BitmapFactory.decodeStream(context.contentResolver.openInputStream(selectedImageUri!!))?.asImageBitmap() ?: Bitmap.createBitmap(1,1,Bitmap.Config.ARGB_8888).asImageBitmap()
+                    ),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                )
+                
+                // Botón para cerrar preview
+                IconButton(
+                    onClick = { selectedImageUri = null; detecciones = emptyList() },
+                    modifier = Modifier.align(Alignment.TopEnd).padding(16.dp).background(Color.Black.copy(0.5f), CircleShape)
+                ) {
+                    Icon(Icons.Default.Close, contentDescription = "Cerrar", tint = Color.White)
+                }
+
+                if (isProcessingGallery) {
+                    Box(
+                        modifier = Modifier.fillMaxSize().background(Color.Black.copy(0.4f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(color = Color.White)
+                            Spacer(Modifier.height(16.dp))
+                            Text("Identificando especies...", color = Color.White, style = MaterialTheme.typography.titleMedium)
                         }
                     }
-                    try {
-                        cameraProvider.unbindAll()
-                        cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            CameraSelector.DEFAULT_BACK_CAMERA,
-                            preview, imageAnalysis, imageCapture
-                        )
-                    } catch (e: Exception) {
-                        Log.e("Camera", "Error al vincular ciclo de vida", e)
-                    }
-                }, ContextCompat.getMainExecutor(ctx))
-                previewView
-            },
-            modifier = Modifier.fillMaxSize()
-        )
+                }
+            }
+        }
 
         // ── Capa de dibujo de detecciones ──
         Canvas(modifier = Modifier.fillMaxSize()) {
-            detecciones.forEach { det ->
-                // Ajustar coordenadas (el modelo recibe 640x640, pero el bitmap escalado mantiene el ratio si usamos imageProxyToBitmap)
-                // DetectorGanado escala el bitmap a 640x640 internamente.
-                // Sin embargo, las coordenadas en Deteccion están basadas en el tamaño del bitmap original pasado a detector.detectar.
-                
-                drawRect(
-                    color = Color.Green,
-                    topLeft = Offset(det.left, det.top),
-                    size = Size(det.right - det.left, det.bottom - det.top),
-                    style = Stroke(width = 2.dp.toPx())
-                )
-                
-                drawText(
-                    textMeasurer = textMeasurer,
-                    text = "${det.clase} ${(det.confianza * 100).toInt()}%",
-                    topLeft = Offset(det.left, (det.top - 25.dp.toPx()).coerceAtLeast(0f)),
-                    style = TextStyle(color = Color.Green, fontSize = 14.sp)
-                )
+            if (analysisSize.width > 0 && analysisSize.height > 0) {
+                val scaleX = size.width / analysisSize.width
+                val scaleY = size.height / analysisSize.height
+
+                detecciones.forEach { det ->
+                    val scaledLeft = det.left * scaleX
+                    val scaledTop = det.top * scaleY
+                    val scaledRight = det.right * scaleX
+                    val scaledBottom = det.bottom * scaleY
+
+                    drawRect(
+                        color = Color.Green,
+                        topLeft = Offset(scaledLeft, scaledTop),
+                        size = Size(scaledRight - scaledLeft, scaledBottom - scaledTop),
+                        style = Stroke(width = 2.dp.toPx())
+                    )
+
+                    drawText(
+                        textMeasurer = textMeasurer,
+                        text = "${det.clase} ${(det.confianza * 100).toInt()}%",
+                        topLeft = Offset(scaledLeft, (scaledTop - 25.dp.toPx()).coerceAtLeast(0f)),
+                        style = TextStyle(color = Color.Green, fontSize = 14.sp)
+                    )
+                }
             }
         }
 
@@ -599,86 +646,19 @@ fun CameraPreview(cameraExecutor: ExecutorService, onResultAdded: (HistoryItem) 
                     .padding(4.dp)
                     .background(Color.White, CircleShape)
                     .clickable(enabled = !isAnalyzing) {
-                        takePhoto(context, imageCapture, cameraExecutor)
+                        takePhoto(context, imageCapture, cameraExecutor, detecciones, analysisSize)
                     }
             )
-
-            // Botón análisis IA
-            IconButton(
-                onClick = {
-                    if (isAnalyzing) return@IconButton
-                    isAnalyzing = true
-                    showSheet = true
-                    aiResponse = "Analizando imagen..."
-                    imageCapture.takePicture(
-                        cameraExecutor,
-                        object : ImageCapture.OnImageCapturedCallback() {
-                            override fun onCaptureSuccess(image: ImageProxy) {
-                                val bitmap = imageProxyToBitmap(image)
-                                image.close()
-                                scope.launch {
-                                    try {
-                                        if (bitmap == null) throw Exception("No se pudo procesar la imagen")
-                                        val response = analyzeImageWithGemini(bitmap)
-                                        aiResponse = response
-                                        onResultAdded(HistoryItem(result = response))
-                                    } catch (e: Exception) {
-                                        aiResponse = "Error: ${e.message}"
-                                    } finally {
-                                        isAnalyzing = false
-                                    }
-                                }
-                            }
-                            override fun onError(e: ImageCaptureException) {
-                                aiResponse = "Error al capturar: ${e.message}"
-                                isAnalyzing = false
-                            }
-                        }
-                    )
-                },
-                enabled = !isAnalyzing,
-                modifier = Modifier
-                    .size(56.dp)
-                    .background(MaterialTheme.colorScheme.primary, CircleShape)
-            ) {
-                if (isAnalyzing) {
-                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
-                } else {
-                    Icon(Icons.Default.AutoAwesome, contentDescription = "Analizar con IA", tint = Color.White)
-                }
-            }
+            
+            // Espaciador para mantener simetría si es necesario
+            Spacer(modifier = Modifier.size(56.dp))
         }
 
-        // ── Bottom sheet con resultado ──
+        // ── Bottom sheet con resultado (Oculto temporalmente) ──
+        /*
         if (showSheet) {
-            ModalBottomSheet(
-                onDismissRequest = { showSheet = false },
-                sheetState = sheetState
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp)
-                        .padding(bottom = 48.dp)
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    Text("Análisis IA", style = MaterialTheme.typography.headlineSmall)
-                    Spacer(Modifier.height(16.dp))
-
-                    if (isAnalyzing) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(12.dp))
-                            Text(aiResponse ?: "Procesando...")
-                        }
-                    } else {
-                        Text(aiResponse ?: "Sin resultado")
-                    }
-
-                    Spacer(Modifier.height(32.dp))
-                }
-            }
-        }
+        ...
+        */
     }
 }
 
@@ -718,35 +698,96 @@ fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
     }
 }
 
-private fun takePhoto(context: Context, imageCapture: ImageCapture, executor: ExecutorService) {
-    val name = "IMG_${System.currentTimeMillis()}.jpg"
-    val folderName = "Hato" // Nombre de tu carpeta personalizada
+private fun takePhoto(
+    context: Context,
+    imageCapture: ImageCapture,
+    executor: ExecutorService,
+    detecciones: List<Deteccion>,
+    analysisSize: Size
+) {
+    imageCapture.takePicture(executor, object : ImageCapture.OnImageCapturedCallback() {
+        override fun onCaptureSuccess(image: ImageProxy) {
+            val bitmap = imageProxyToBitmap(image)
+            image.close()
+
+            if (bitmap == null) return
+
+            // Crear un bitmap mutable para poder dibujar encima
+            val mutableBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+            val canvas = android.graphics.Canvas(mutableBitmap)
+
+            // Configurar pinceles
+            val paint = Paint().apply {
+                color = android.graphics.Color.GREEN
+                style = Paint.Style.STROKE
+                strokeWidth = bitmap.width / 150f // Grosor dinámico según resolución
+                isAntiAlias = true
+            }
+
+            val textPaint = Paint().apply {
+                color = android.graphics.Color.GREEN
+                textSize = bitmap.width / 35f // Tamaño de texto dinámico
+                isAntiAlias = true
+                typeface = Typeface.DEFAULT_BOLD
+            }
+
+            // Dibujar cada detección escalada
+            if (analysisSize.width > 0 && analysisSize.height > 0) {
+                val scaleX = bitmap.width.toFloat() / analysisSize.width
+                val scaleY = bitmap.height.toFloat() / analysisSize.height
+
+                detecciones.forEach { det ->
+                    val left = det.left * scaleX
+                    val top = det.top * scaleY
+                    val right = det.right * scaleX
+                    val bottom = det.bottom * scaleY
+
+                    canvas.drawRect(left, top, right, bottom, paint)
+                    canvas.drawText(
+                        "${det.clase} ${(det.confianza * 100).toInt()}%",
+                        left,
+                        (top - (bitmap.width / 100f)).coerceAtLeast(textPaint.textSize),
+                        textPaint
+                    )
+                }
+            }
+
+            saveBitmapToGallery(context, mutableBitmap)
+        }
+
+        override fun onError(e: ImageCaptureException) {
+            Log.e("Camera", "Error al capturar foto", e)
+        }
+    })
+}
+
+private fun saveBitmapToGallery(context: Context, bitmap: Bitmap) {
+    val name = "IMG_HATO_${System.currentTimeMillis()}.jpg"
+    val folderName = "Hato"
 
     val contentValues = ContentValues().apply {
         put(MediaStore.MediaColumns.DISPLAY_NAME, name)
         put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Esto creará automáticamente la carpeta dentro de Pictures
             put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/$folderName")
         }
     }
 
-    val outputOptions = ImageCapture.OutputFileOptions.Builder(
-        context.contentResolver,
-        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-        contentValues
-    ).build()
+    val resolver = context.contentResolver
+    val imageUri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
 
-    imageCapture.takePicture(outputOptions, executor, object : ImageCapture.OnImageSavedCallback {
-        override fun onError(e: ImageCaptureException) {
-            Log.e("Camera", "Error al guardar foto", e)
-        }
-        override fun onImageSaved(o: ImageCapture.OutputFileResults) {
-            (context as? MainActivity)?.runOnUiThread {
-                Toast.makeText(context, "Foto guardada en Pictures/$folderName", Toast.LENGTH_SHORT).show()
+    imageUri?.let { uri ->
+        try {
+            resolver.openOutputStream(uri)?.use { stream ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)
             }
+            (context as? MainActivity)?.runOnUiThread {
+                Toast.makeText(context, "Foto guardada con éxito en $folderName", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Log.e("Camera", "Error al guardar bitmap", e)
         }
-    })
+    }
 }
 
 @ExperimentalGetImage
