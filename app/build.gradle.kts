@@ -18,6 +18,10 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
+
         // Leer la clave de local.properties de forma correcta
         val localProperties = Properties()
         val localPropertiesFile = rootProject.file("local.properties")
@@ -46,6 +50,9 @@ android {
         compose = true
         buildConfig = true  // ← AGREGAR ESTO: activa la generación de BuildConfig
     }
+    androidResources {
+        noCompress.add("onnx")
+    }
 }
 
 dependencies {
@@ -69,10 +76,22 @@ dependencies {
     implementation(libs.mlkit.barcode.scanning)
 
     // LiteRT (Anteriormente TensorFlow Lite, soporta 16 KB page size)
-    implementation("com.google.ai.edge.litert:litert:2.1.5")
-    implementation("com.google.ai.edge.litert:litert-support:1.4.2")
-    implementation("com.google.ai.edge.litert:litert-metadata:1.4.2")
-    implementation("com.google.ai.edge.litert:litert-gpu:1.4.2")
+    implementation(libs.litert)
+    implementation(libs.litert.support) {
+        exclude(group = "com.google.ai.edge.litert", module = "litert-api")
+    }
+    implementation(libs.litert.metadata) {
+        exclude(group = "com.google.ai.edge.litert", module = "litert-api")
+    }
+    implementation(libs.litert.gpu) {
+        exclude(group = "com.google.ai.edge.litert", module = "litert-api")
+    }
+
+    // ONNX Runtime
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:latest.release")
+    
+    // OpenCV
+    implementation(libs.opencv)
 
     // OkHttp
     implementation(libs.okhttp)

@@ -44,7 +44,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -418,13 +426,22 @@ fun CameraPreview(cameraExecutor: ExecutorService, onResultAdded: (HistoryItem) 
     var aiResponse by remember { mutableStateOf<String?>(null) }
     var isAnalyzing by remember { mutableStateOf(false) }
     var showSheet by remember { mutableStateOf(false) }
+    
+    var detecciones by remember { mutableStateOf<List<Deteccion>>(emptyList()) }
+    var previewSize by remember { mutableStateOf(Size.Zero) }
+    val textMeasurer = rememberTextMeasurer()
 
     val sheetState = rememberModalBottomSheetState()
 
     // Cerrar el scanner correctamente al salir del Composable
     val scanner = remember { BarcodeScanning.getClient() }
+    val detector = remember { DetectorGanado(context) }
+    
     DisposableEffect(Unit) {
-        onDispose { scanner.close() }
+        onDispose { 
+            scanner.close()
+            detector.cerrar()
+        }
     }
 
     val imageCapture = remember { ImageCapture.Builder().build() }
@@ -463,7 +480,11 @@ fun CameraPreview(cameraExecutor: ExecutorService, onResultAdded: (HistoryItem) 
         // ── Vista de cámara ──
         AndroidView(
             factory = { ctx ->
-                val previewView = PreviewView(ctx)
+                val previewView = PreviewView(ctx).apply {
+                    addOnLayoutChangeListener { _, left, top, right, bottom, _, _, _, _ ->
+                        previewSize = Size((right - left).toFloat(), (bottom - top).toFloat())
+                    }
+                }
                 val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
                 cameraProviderFuture.addListener({
                     val cameraProvider = cameraProviderFuture.get()
@@ -472,9 +493,37 @@ fun CameraPreview(cameraExecutor: ExecutorService, onResultAdded: (HistoryItem) 
                     }
                     val imageAnalysis = ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                         .build()
-                    imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy ->
-                        processImageProxy(scanner, imageProxy) { scannedText = it }
+                    imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                        val rotation = imageProxy.imageInfo.rotationDegrees
+                        // 1. Detección de ganado (ONNX)
+                        val bitmap = imageProxyToBitmap(imageProxy)
+                        if (bitmap != null) {
+                            val results = detector.detectar(bitmap)
+                            previewView.post {
+                                detecciones = results
+                            }
+                        }
+                        
+                        // 2. Detección de código de barras
+                        val mediaImage = imageProxy.image
+                        if (mediaImage != null) {
+                            val image = InputImage.fromMediaImage(mediaImage, rotation)
+                            scanner.process(image)
+                                .addOnSuccessListener { barcodes ->
+                                    for (barcode in barcodes) {
+                                        barcode.rawValue?.let { text ->
+                                            previewView.post { scannedText = text }
+                                        }
+                                    }
+                                }
+                                .addOnCompleteListener {
+                                    imageProxy.close()
+                                }
+                        } else {
+                            imageProxy.close()
+                        }
                     }
                     try {
                         cameraProvider.unbindAll()
@@ -491,6 +540,29 @@ fun CameraPreview(cameraExecutor: ExecutorService, onResultAdded: (HistoryItem) 
             },
             modifier = Modifier.fillMaxSize()
         )
+
+        // ── Capa de dibujo de detecciones ──
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            detecciones.forEach { det ->
+                // Ajustar coordenadas (el modelo recibe 640x640, pero el bitmap escalado mantiene el ratio si usamos imageProxyToBitmap)
+                // DetectorGanado escala el bitmap a 640x640 internamente.
+                // Sin embargo, las coordenadas en Deteccion están basadas en el tamaño del bitmap original pasado a detector.detectar.
+                
+                drawRect(
+                    color = Color.Green,
+                    topLeft = Offset(det.left, det.top),
+                    size = Size(det.right - det.left, det.bottom - det.top),
+                    style = Stroke(width = 2.dp.toPx())
+                )
+                
+                drawText(
+                    textMeasurer = textMeasurer,
+                    text = "${det.clase} ${(det.confianza * 100).toInt()}%",
+                    topLeft = Offset(det.left, (det.top - 25.dp.toPx()).coerceAtLeast(0f)),
+                    style = TextStyle(color = Color.Green, fontSize = 14.sp)
+                )
+            }
+        }
 
         // ── Código escaneado ──
         if (scannedText.isNotEmpty()) {
@@ -613,12 +685,37 @@ fun CameraPreview(cameraExecutor: ExecutorService, onResultAdded: (HistoryItem) 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
-    val buffer = image.planes[0].buffer
-    val bytes = ByteArray(buffer.remaining())
-    buffer.get(bytes)
-    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
-    val matrix = Matrix().apply { postRotate(image.imageInfo.rotationDegrees.toFloat()) }
-    return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    if (image.format == android.graphics.ImageFormat.YUV_420_888) {
+        val yBuffer = image.planes[0].buffer
+        val uBuffer = image.planes[1].buffer
+        val vBuffer = image.planes[2].buffer
+
+        val ySize = yBuffer.remaining()
+        val uSize = uBuffer.remaining()
+        val vSize = vBuffer.remaining()
+
+        val nv21 = ByteArray(ySize + uSize + vSize)
+
+        yBuffer.get(nv21, 0, ySize)
+        vBuffer.get(nv21, ySize, vSize)
+        uBuffer.get(nv21, ySize + vSize, uSize)
+
+        val yuvImage = android.graphics.YuvImage(nv21, android.graphics.ImageFormat.NV21, image.width, image.height, null)
+        val out = ByteArrayOutputStream()
+        yuvImage.compressToJpeg(android.graphics.Rect(0, 0, yuvImage.width, yuvImage.height), 100, out)
+        val imageBytes = out.toByteArray()
+        val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size) ?: return null
+        val matrix = Matrix().apply { postRotate(image.imageInfo.rotationDegrees.toFloat()) }
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    } else {
+        // Fallback para otros formatos (como RGBA_8888 si se capturó así)
+        val buffer = image.planes[0].buffer
+        val bytes = ByteArray(buffer.remaining())
+        buffer.get(bytes)
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        val matrix = Matrix().apply { postRotate(image.imageInfo.rotationDegrees.toFloat()) }
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    }
 }
 
 private fun takePhoto(context: Context, imageCapture: ImageCapture, executor: ExecutorService) {

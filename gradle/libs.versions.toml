@@ -11,6 +11,9 @@ composeBom = "2025.05.00"
 camerax = "1.6.0"
 mlkit-barcode = "17.3.0"
 okhttp = "4.12.0"
+opencv = "4.10.0"
+litert = "2.1.5"
+litert-support = "1.4.2"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -40,6 +43,15 @@ mlkit-barcode-scanning = { group = "com.google.mlkit", name = "barcode-scanning"
 
 # OkHttp
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+
+# OpenCV
+opencv = { group = "org.opencv", name = "opencv", version.ref = "opencv" }
+
+# LiteRT
+litert = { group = "com.google.ai.edge.litert", name = "litert", version.ref = "litert" }
+litert-support = { group = "com.google.ai.edge.litert", name = "litert-support", version.ref = "litert-support" }
+litert-metadata = { group = "com.google.ai.edge.litert", name = "litert-metadata", version.ref = "litert-support" }
+litert-gpu = { group = "com.google.ai.edge.litert", name = "litert-gpu", version.ref = "litert-support" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
