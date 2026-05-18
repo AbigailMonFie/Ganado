@@ -68,11 +68,11 @@ dependencies {
     // ML Kit
     implementation(libs.mlkit.barcode.scanning)
 
-    // TensorFlow Lite (Para tu modelo local)
-    implementation("org.tensorflow:tensorflow-lite:2.14.0")
-    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
-    implementation("org.tensorflow:tensorflow-lite-metadata:0.4.4")
-    implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0") // Opcional para mayor velocidad
+    // LiteRT (Anteriormente TensorFlow Lite, soporta 16 KB page size)
+    implementation("com.google.ai.edge.litert:litert:2.1.5")
+    implementation("com.google.ai.edge.litert:litert-support:1.4.2")
+    implementation("com.google.ai.edge.litert:litert-metadata:1.4.2")
+    implementation("com.google.ai.edge.litert:litert-gpu:1.4.2")
 
     // OkHttp
     implementation(libs.okhttp)
