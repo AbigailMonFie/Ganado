@@ -18,6 +18,7 @@ import android.util.Base64
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -30,6 +31,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -39,6 +41,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.Image
@@ -68,29 +71,10 @@ import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-
-// ─── API Key ───────────────────────────────────────────────────────────────────
-// Obtener la API Key desde BuildConfig (configurada en build.gradle y local.properties)
-private val API_KEY: String = BuildConfig.GEMINI_API_KEY
-private const val GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key="
-
-// ─── Cliente HTTP singleton ────────────────────────────────────────────────────
-private val httpClient: OkHttpClient by lazy {
-    OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .build()
-}
 
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -102,7 +86,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         cameraExecutor = Executors.newSingleThreadExecutor()
         setContent {
-            GanadoTheme {
+            GanadoTheme(darkTheme = false, dynamicColor = false) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     ScannerScreen(cameraExecutor)
                 }
@@ -114,61 +98,6 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         cameraExecutor.shutdown()
     }
-}
-
-// ─── Llamada a Gemini 1.5 Pro ─────────────────────────────────────────────────
-suspend fun analyzeImageWithGemini(bitmap: Bitmap): String = withContext(Dispatchers.IO) {
-    val stream = ByteArrayOutputStream()
-    bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
-    val base64Image = Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
-
-    // Construir body con JSONObject para evitar errores de escapado
-    val textPart = JSONObject().apply {
-        put("text",
-            "Analiza este animal de ganado de forma muy breve y resumida. " +
-                    "Responde en este formato exacto:\n" +
-                    "• RAZA: [Nombre]\n" +
-                    "• PESO: [Número] kg\n" +
-                    "• SALUD: [Estado breve]\n" +
-                    "• NOTA: [Una observación corta]"
-        )
-    }
-
-    val imagePart = JSONObject().apply {
-        put("inline_data", JSONObject().apply {
-            put("mime_type", "image/jpeg")
-            put("data", base64Image)
-        })
-    }
-
-    val body = JSONObject().apply {
-        put("contents", org.json.JSONArray().apply {
-            put(JSONObject().apply {
-                put("parts", org.json.JSONArray().apply {
-                    put(textPart)
-                    put(imagePart)
-                })
-            })
-        })
-    }
-
-    val request = Request.Builder()
-        .url("$GEMINI_URL$API_KEY")
-        .post(body.toString().toRequestBody("application/json".toMediaType()))
-        .build()
-
-    val response = httpClient.newCall(request).execute()
-    val responseBody = response.body?.string() ?: throw Exception("Sin respuesta del servidor")
-
-    if (!response.isSuccessful) throw Exception("Error ${response.code}: $responseBody")
-
-    JSONObject(responseBody)
-        .getJSONArray("candidates")
-        .getJSONObject(0)
-        .getJSONObject("content")
-        .getJSONArray("parts")
-        .getJSONObject(0)
-        .getString("text")
 }
 
 // ─── Estructura de Historial ──────────────────────────────────────────────────
@@ -183,6 +112,9 @@ data class HistoryItem(
 fun ScannerScreen(cameraExecutor: ExecutorService) {
     val context = LocalContext.current
     
+    // Estado para la acción activa: null (elección), "camera", "gallery_uri", "history"
+    var activeAction by rememberSaveable { mutableStateOf<String?>(null) }
+
     // Estado para mostrar el tutorial (solo la primera vez)
     val prefs = remember { context.getSharedPreferences("ganado_prefs", Context.MODE_PRIVATE) }
     var showTutorial by rememberSaveable { mutableStateOf(prefs.getBoolean("first_run", true)) }
@@ -200,50 +132,70 @@ fun ScannerScreen(cameraExecutor: ExecutorService) {
         if (!hasCameraPermission) launcher.launch(Manifest.permission.CAMERA)
     }
 
-    var selectedTab by remember { mutableStateOf(0) }
     val historyList = remember { mutableStateListOf<HistoryItem>() }
 
+    if (activeAction != null) {
+        BackHandler {
+            activeAction = null
+        }
+    }
+
+    // Lanzador de galería para la pantalla de selección
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            activeAction = "gallery_$uri"
+        } else {
+            activeAction = null
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
-        Scaffold(
-            bottomBar = {
-                NavigationBar {
-                    NavigationBarItem(
-                        selected = selectedTab == 0,
-                        onClick = { selectedTab = 0 },
-                        icon = { Icon(Icons.Default.CameraAlt, contentDescription = "Scanner") },
-                        label = { Text("Scanner") }
+        Box(modifier = Modifier.fillMaxSize()) {
+            if (activeAction == null) {
+                SelectionScreen(
+                    onCameraClick = { activeAction = "camera" },
+                    onGalleryClick = { galleryLauncher.launch("image/*") },
+                    onHistoryClick = { activeAction = "history" }
+                )
+            } else if (activeAction == "camera") {
+                if (hasCameraPermission) {
+                    CameraPreview(
+                        cameraExecutor = cameraExecutor,
+                        onBack = { activeAction = null },
+                        onResultAdded = { newItem -> historyList.add(0, newItem) }
                     )
-                    NavigationBarItem(
-                        selected = selectedTab == 1,
-                        onClick = { selectedTab = 1 },
-                        icon = { Icon(Icons.Default.History, contentDescription = "Historial") },
-                        label = { Text("Historial") }
-                    )
-                }
-            }
-        ) { padding ->
-            Box(modifier = Modifier.padding(padding).fillMaxSize()) {
-                if (selectedTab == 0) {
-                    if (hasCameraPermission) {
-                        CameraPreview(cameraExecutor) { newItem ->
-                            historyList.add(0, newItem)
+                } else {
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text("Permiso de cámara necesario")
+                        Spacer(Modifier.height(12.dp))
+                        Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) {
+                            Text("Permitir")
                         }
-                    } else {
-                        Column(
-                            modifier = Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.Center,
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text("Permiso de cámara necesario")
-                            Spacer(Modifier.height(12.dp))
-                            Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) {
-                                Text("Permitir")
-                            }
+                        TextButton(onClick = { activeAction = null }) {
+                            Text("Volver")
                         }
                     }
-                } else {
-                    HistoryScreen(historyList)
                 }
+            } else if (activeAction?.startsWith("gallery_") == true) {
+                val uriString = activeAction!!.removePrefix("gallery_")
+                val uri = android.net.Uri.parse(uriString)
+                CameraPreview(
+                    cameraExecutor = cameraExecutor,
+                    initialGalleryUri = uri,
+                    onBack = { activeAction = null },
+                    onResultAdded = { newItem -> historyList.add(0, newItem) }
+                )
+            } else if (activeAction == "history") {
+                HistoryScreen(
+                    historyList = historyList,
+                    onBack = { activeAction = null }
+                )
             }
         }
 
@@ -263,28 +215,23 @@ fun OnboardingTutorial(onDismiss: () -> Unit) {
     val steps = listOf(
         TutorialStep(
             "¡Bienvenido a Hato!",
-            "Esta herramienta utiliza IA para ayudarte a identificar y evaluar tu ganado rápidamente.",
+            "Esta herramienta utiliza visión artificial local para ayudarte a identificar tu ganado rápidamente.",
             Icons.Default.Info
         ),
         TutorialStep(
-            "Escanea tu Ganado",
-            "Apunta la cámara al animal. Intenta que se vea de perfil para mejores resultados de peso.",
+            "Identificación en Vivo",
+            "Apunta la cámara al animal. El sistema detectará automáticamente la especie en pantalla.",
             Icons.Default.CameraAlt
         ),
         TutorialStep(
-            "Análisis con IA",
-            "Toca el botón con estrellas (AutoAwesome) para que la IA identifique la raza, peso y salud.",
-            Icons.Default.AutoAwesome
-        ),
-        TutorialStep(
             "Historial y Galería",
-            "Consulta tus análisis pasados en la pestaña Historial o sube fotos desde tu galería.",
+            "Consulta tus detecciones pasadas en la pestaña Historial o sube fotos desde tu galería.",
             Icons.Default.History
         )
     )
 
     Surface(
-        color = Color.Black.copy(alpha = 0.85f),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
         modifier = Modifier.fillMaxSize()
     ) {
         Column(
@@ -304,14 +251,14 @@ fun OnboardingTutorial(onDismiss: () -> Unit) {
             Text(
                 text = steps[currentStep].title,
                 style = MaterialTheme.typography.headlineMedium,
-                color = Color.White,
+                color = MaterialTheme.colorScheme.onSurface,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
             Spacer(Modifier.height(16.dp))
             Text(
                 text = steps[currentStep].description,
                 style = MaterialTheme.typography.bodyLarge,
-                color = Color.White.copy(alpha = 0.8f),
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
             Spacer(Modifier.height(48.dp))
@@ -324,7 +271,7 @@ fun OnboardingTutorial(onDismiss: () -> Unit) {
                 // Indicador de pasos
                 Text(
                     text = "${currentStep + 1} de ${steps.size}",
-                    color = Color.White.copy(alpha = 0.6f)
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
 
                 Button(
@@ -350,13 +297,102 @@ data class TutorialStep(
 )
 
 @Composable
-fun HistoryScreen(historyList: List<HistoryItem>) {
+fun SelectionScreen(onCameraClick: () -> Unit, onGalleryClick: () -> Unit, onHistoryClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // Logo de la App
+        Image(
+            painter = androidx.compose.ui.res.painterResource(id = R.drawable.hato),
+            contentDescription = "Logo Hato",
+            modifier = Modifier
+                .size(180.dp)
+                .clip(RoundedCornerShape(24.dp)), // Esquinas redondeadas suaves
+            contentScale = ContentScale.Fit
+        )
+        Spacer(Modifier.height(32.dp))
+        Text(
+            text = "Bienvenido a Hato",
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.onBackground
+        )
+        Text(
+            text = "¿Cómo deseas tratar a tu ganado?",
+            style = MaterialTheme.typography.bodyLarge,
+            color = Color.Gray
+        )
+        Spacer(Modifier.height(48.dp))
+
+        Button(
+            onClick = onCameraClick,
+            modifier = Modifier.fillMaxWidth().height(60.dp),
+            shape = MaterialTheme.shapes.medium
+        ) {
+            Icon(
+                painter = androidx.compose.ui.res.painterResource(id = R.drawable.camara),
+                contentDescription = null,
+                modifier = Modifier.size(50.dp),
+                tint = Color.Unspecified
+            )
+            Spacer(Modifier.width(12.dp))
+            Text("Usar Cámara en Vivo", style = MaterialTheme.typography.titleMedium)
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        OutlinedButton(
+            onClick = onGalleryClick,
+            modifier = Modifier.fillMaxWidth().height(60.dp),
+            shape = MaterialTheme.shapes.medium
+        ) {
+            Icon(
+                painter = androidx.compose.ui.res.painterResource(id = R.drawable.lupa),
+                contentDescription = null,
+                modifier = Modifier.size(50.dp),
+                tint = Color.Unspecified
+            )
+            Spacer(Modifier.width(12.dp))
+            Text("Cargar desde el Dispositivo", style = MaterialTheme.typography.titleMedium)
+        }
+
+        Spacer(Modifier.height(50.dp))
+
+        TextButton(
+            onClick = onHistoryClick,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(
+                painter = androidx.compose.ui.res.painterResource(id = R.drawable.historial),
+                contentDescription = null,
+                modifier = Modifier.size(50.dp),
+                tint = Color.Unspecified
+            )
+            Spacer(Modifier.width(8.dp))
+            Text("Ver Historial de Análisis", style = MaterialTheme.typography.titleMedium)
+        }
+    }
+}
+
+@Composable
+fun HistoryScreen(historyList: List<HistoryItem>, onBack: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        Text("Historial de Análisis", style = MaterialTheme.typography.headlineMedium)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Default.Close, contentDescription = "Volver")
+            }
+            Text("Historial de Análisis", style = MaterialTheme.typography.headlineMedium)
+        }
         Spacer(Modifier.height(16.dp))
 
         if (historyList.isEmpty()) {
@@ -380,20 +416,32 @@ fun HistoryScreen(historyList: List<HistoryItem>) {
                         Column(modifier = Modifier.padding(12.dp)) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
+                                horizontalArrangement = Arrangement.Start,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                // Resumen: Primera línea (generalmente la raza)
-                                val summary = item.result.lines().firstOrNull { it.isNotBlank() } ?: "Análisis"
-                                Text(
-                                    text = summary,
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = MaterialTheme.colorScheme.primary
+                                Image(
+                                    painter = androidx.compose.ui.res.painterResource(id = R.drawable.hist),
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(100.dp)
+                                        .clip(RoundedCornerShape(6.dp)),
+                                    contentScale = ContentScale.Fit
                                 )
-                                Text(
-                                    text = item.date.split(" ").first(), // Solo la fecha
-                                    style = MaterialTheme.typography.labelSmall
-                                )
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    // Resumen: Primera línea (generalmente la raza)
+                                    val summary = item.result.lines().firstOrNull { it.isNotBlank() } ?: "Análisis"
+                                    Text(
+                                        text = summary,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        text = item.date,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.Gray
+                                    )
+                                }
                             }
                             
                             if (expanded) {
@@ -422,29 +470,52 @@ fun HistoryScreen(historyList: List<HistoryItem>) {
 // ─── Vista principal con cámara ───────────────────────────────────────────────
 @ExperimentalGetImage
 @Composable
-fun CameraPreview(cameraExecutor: ExecutorService, onResultAdded: (HistoryItem) -> Unit) {
+fun CameraPreview(
+    cameraExecutor: ExecutorService,
+    initialGalleryUri: android.net.Uri? = null,
+    onBack: () -> Unit,
+    onResultAdded: (HistoryItem) -> Unit
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val scope = rememberCoroutineScope()
 
     var scannedText by remember { mutableStateOf("") }
-    var aiResponse by remember { mutableStateOf<String?>(null) }
-    var isAnalyzing by remember { mutableStateOf(false) }
-    var showSheet by remember { mutableStateOf(false) }
     
     var detecciones by remember { mutableStateOf<List<Deteccion>>(emptyList()) }
     var analysisSize by remember { mutableStateOf(Size.Zero) }
     var previewSize by remember { mutableStateOf(Size.Zero) }
     val textMeasurer = rememberTextMeasurer()
 
-    var selectedImageUri by remember { mutableStateOf<android.net.Uri?>(null) }
+    var selectedImageUri by remember { mutableStateOf<android.net.Uri?>(initialGalleryUri) }
     var isProcessingGallery by remember { mutableStateOf(false) }
-
-    val sheetState = rememberModalBottomSheetState()
 
     // Cerrar el scanner correctamente al salir del Composable
     val scanner = remember { BarcodeScanning.getClient() }
     val detector = remember { DetectorGanado(context) }
+    
+    // Si entramos con una URI de galería, procesarla inmediatamente
+    LaunchedEffect(initialGalleryUri) {
+        if (initialGalleryUri != null && detecciones.isEmpty()) {
+            isProcessingGallery = true
+            try {
+                kotlinx.coroutines.delay(1000)
+                val inputStream = context.contentResolver.openInputStream(initialGalleryUri)
+                val bitmap = BitmapFactory.decodeStream(inputStream)
+                if (bitmap != null) {
+                    analysisSize = Size(bitmap.width.toFloat(), bitmap.height.toFloat())
+                    detecciones = detector.detectar(bitmap)
+                    if (detecciones.isNotEmpty()) {
+                        val resultString = detecciones.joinToString("\n") { "${it.clase} (${(it.confianza * 100).toInt()}%)" }
+                        onResultAdded(HistoryItem(result = resultString))
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("Gallery", "Error", e)
+            } finally {
+                isProcessingGallery = false
+            }
+        }
+    }
     
     DisposableEffect(Unit) {
         onDispose { 
@@ -454,34 +525,6 @@ fun CameraPreview(cameraExecutor: ExecutorService, onResultAdded: (HistoryItem) 
     }
 
     val imageCapture = remember { ImageCapture.Builder().build() }
-
-    // ── Lanzador de galería ──
-    val galleryLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri ->
-        uri?.let {
-            selectedImageUri = it
-            isProcessingGallery = true
-            scope.launch {
-                try {
-                    // Simular retraso para la animación de identificación
-                    kotlinx.coroutines.delay(1500)
-                    
-                    val inputStream = context.contentResolver.openInputStream(it)
-                    val bitmap = BitmapFactory.decodeStream(inputStream)
-                    if (bitmap != null) {
-                        analysisSize = Size(bitmap.width.toFloat(), bitmap.height.toFloat())
-                        val results = detector.detectar(bitmap)
-                        detecciones = results
-                    }
-                } catch (e: Exception) {
-                    Log.e("Gallery", "Error al procesar imagen", e)
-                } finally {
-                    isProcessingGallery = false
-                }
-            }
-        }
-    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         if (selectedImageUri == null) {
@@ -559,14 +602,6 @@ fun CameraPreview(cameraExecutor: ExecutorService, onResultAdded: (HistoryItem) 
                     contentScale = androidx.compose.ui.layout.ContentScale.Fit
                 )
                 
-                // Botón para cerrar preview
-                IconButton(
-                    onClick = { selectedImageUri = null; detecciones = emptyList() },
-                    modifier = Modifier.align(Alignment.TopEnd).padding(16.dp).background(Color.Black.copy(0.5f), CircleShape)
-                ) {
-                    Icon(Icons.Default.Close, contentDescription = "Cerrar", tint = Color.White)
-                }
-
                 if (isProcessingGallery) {
                     Box(
                         modifier = Modifier.fillMaxSize().background(Color.Black.copy(0.4f)),
@@ -624,20 +659,9 @@ fun CameraPreview(cameraExecutor: ExecutorService, onResultAdded: (HistoryItem) 
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .padding(bottom = 48.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
+            horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Botón galería
-            IconButton(
-                onClick = { if (!isAnalyzing) galleryLauncher.launch("image/*") },
-                enabled = !isAnalyzing,
-                modifier = Modifier
-                    .size(56.dp)
-                    .background(Color.Black.copy(0.5f), CircleShape)
-            ) {
-                Icon(Icons.Default.PhotoLibrary, contentDescription = "Galería", tint = Color.White)
-            }
-
             // Botón captura (solo guarda foto)
             Box(
                 modifier = Modifier
@@ -645,20 +669,14 @@ fun CameraPreview(cameraExecutor: ExecutorService, onResultAdded: (HistoryItem) 
                     .border(4.dp, Color.White, CircleShape)
                     .padding(4.dp)
                     .background(Color.White, CircleShape)
-                    .clickable(enabled = !isAnalyzing) {
+                    .clickable {
+                        val resultString = if (detecciones.isEmpty()) "Sin detecciones" 
+                                           else detecciones.joinToString("\n") { "${it.clase} (${(it.confianza * 100).toInt()}%)" }
+                        onResultAdded(HistoryItem(result = resultString))
                         takePhoto(context, imageCapture, cameraExecutor, detecciones, analysisSize)
                     }
             )
-            
-            // Espaciador para mantener simetría si es necesario
-            Spacer(modifier = Modifier.size(56.dp))
         }
-
-        // ── Bottom sheet con resultado (Oculto temporalmente) ──
-        /*
-        if (showSheet) {
-        ...
-        */
     }
 }
 

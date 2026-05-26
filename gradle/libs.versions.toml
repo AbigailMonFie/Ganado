@@ -11,7 +11,7 @@ composeBom = "2025.05.00"
 camerax = "1.6.0"
 mlkit-barcode = "17.3.0"
 okhttp = "4.12.0"
-opencv = "4.10.0"
+opencv = "4.13.0"
 litert = "2.1.5"
 litert-support = "1.4.2"
 

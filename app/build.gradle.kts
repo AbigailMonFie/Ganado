@@ -1,5 +1,3 @@
-import java.util.Properties
-
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -8,11 +6,12 @@ plugins {
 android {
     namespace = "com.fierro.ganado"
     compileSdk = 36
+    ndkVersion = "27.0.12077973"
 
     defaultConfig {
         applicationId = "com.fierro.ganado"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = 34 // Mantenemos 34 para evitar la restricción de 16KB de Android 15
         versionCode = 1
         versionName = "1.0"
 
@@ -21,16 +20,6 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
-
-        // Leer la clave de local.properties de forma correcta
-        val localProperties = Properties()
-        val localPropertiesFile = rootProject.file("local.properties")
-        if (localPropertiesFile.exists()) {
-            localProperties.load(localPropertiesFile.inputStream())
-        }
-        val apiKey = localProperties.getProperty("GEMINI_API_KEY") ?: ""
-        
-        buildConfigField("String", "GEMINI_API_KEY", "\"$apiKey\"")
     }
 
     buildTypes {
@@ -48,10 +37,16 @@ android {
     }
     buildFeatures {
         compose = true
-        buildConfig = true  // ← AGREGAR ESTO: activa la generación de BuildConfig
+        buildConfig = true
     }
     androidResources {
         noCompress.add("onnx")
+        noCompress.add("tflite")
+    }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
     }
 }
 
@@ -75,26 +70,25 @@ dependencies {
     // ML Kit
     implementation(libs.mlkit.barcode.scanning)
 
-    // LiteRT (Anteriormente TensorFlow Lite, soporta 16 KB page size)
+    // LiteRT (Nueva versión de TensorFlow Lite compatible con Android 15+)
     implementation(libs.litert)
     implementation(libs.litert.support) {
         exclude(group = "com.google.ai.edge.litert", module = "litert-api")
+        exclude(group = "com.google.ai.edge.litert", module = "litert-support-api")
     }
     implementation(libs.litert.metadata) {
         exclude(group = "com.google.ai.edge.litert", module = "litert-api")
+        exclude(group = "com.google.ai.edge.litert", module = "litert-support-api")
     }
     implementation(libs.litert.gpu) {
         exclude(group = "com.google.ai.edge.litert", module = "litert-api")
     }
 
-    // ONNX Runtime
+    // ONNX Runtime (Para DetectorGanado.kt)
     implementation("com.microsoft.onnxruntime:onnxruntime-android:latest.release")
     
     // OpenCV
     implementation(libs.opencv)
-
-    // OkHttp
-    implementation(libs.okhttp)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
